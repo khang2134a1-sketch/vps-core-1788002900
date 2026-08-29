@@ -1,0 +1,62 @@
+name: Create VPS (Auto Restart)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+env:
+  VPS_NAME: main-vps
+  GITHUB_TOKEN_VPS: ${{ secrets.GH_TOKEN }}
+  NGROK_SERVER_URL: ""
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: ⬇️ Checkout source
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_TOKEN }}
+
+    - name: 🖥️ Cài đặt TightVNC, noVNC, Cloudflared
+      shell: pwsh
+      run: |
+        Write-Host "📥 Installing components..."
+        Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.63/tightvnc-2.8.63-gpl-setup-64bit.msi" -OutFile "tightvnc-setup.msi"
+        Start-Process msiexec.exe -Wait -ArgumentList '/i tightvnc-setup.msi /quiet /norestart ADDLOCAL="Server" SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=1 SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=hieudz SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=1 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1'
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AllowLoopback" -Value 1 -ErrorAction SilentlyContinue
+        
+        Stop-Process -Name "tvnserver" -Force -ErrorAction SilentlyContinue
+        Start-Process -FilePath "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-run -localhost no" -WindowStyle Hidden
+        
+        netsh advfirewall firewall add rule name="Allow VNC 5900" dir=in action=allow protocol=TCP localport=5900
+        netsh advfirewall firewall add rule name="Allow noVNC 6080" dir=in action=allow protocol=TCP localport=6080
+        
+        python -m pip install --upgrade pip
+        pip install novnc websockify==0.13.0
+        
+        Start-Process -FilePath "python" -ArgumentList "-m", "websockify", "6080", "127.0.0.1:5900", "--web", "C:\Users\runneradmin\AppData\Local\Programs\Python\Python312\Lib\site-packages\novnc" -WindowStyle Hidden
+        
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel", "--url", "http://localhost:6080", "--no-autoupdate" -WindowStyle Hidden
+        
+        Start-Sleep -Seconds 30
+        $logContent = Get-Content "cloudflared.log" -Raw -ErrorAction SilentlyContinue
+        if ($logContent -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+            $cloudflaredUrl = $matches[0]
+            $remoteLink = "$cloudflaredUrl/vnc.html"
+            $remoteLink | Out-File -FilePath "remote-link.txt" -Encoding UTF8 -NoNewline
+            
+            git config --global user.email "41898282+bot@users.noreply.github.com"
+            git config --global user.name "VPS Bot"
+            git add remote-link.txt
+            git commit -m "🔗 VPS URL Generated"
+            git push origin main
+        }
+        
+        Start-Sleep -Seconds 20000
